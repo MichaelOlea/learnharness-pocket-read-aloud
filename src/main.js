@@ -185,12 +185,80 @@ function chunkPassages(anchor) {
 
 // Cache repeated renders of the same lesson without retaining the lesson DOM.
 const mathPhrases = new Map();
+// MathLive supplies the math vocabulary and scope markers. Keep explicit
+// boundaries for nested scripts, where a pause alone can change the meaning.
+function conversationalScripts(phrase) {
+	const ordinals = ["zeroth", "first", "second", "third", "fourth", "fifth",
+		"sixth", "seventh", "eighth", "ninth", "tenth", "eleventh", "twelfth"];
+	// MathLive emits the power before the index for a variable carrying both.
+	// Move a simple power after the entire index, before simplifying either.
+	phrase = phrase.replace(/\b(squared|cubed|(?:raised )?to the [\w -]+?;)\s+(sub \w+|subscript (?:(?!\bsub(?:script)?\b)[^.;])+\. End subscript\.)/gi,
+		(_, power, index) => index + ", " + power);
+	phrase = phrase.replace(/\b(?:raised )?to the (\d+) power;/g, (_, value) =>
+		ordinals[Number(value)] ? "to the " + ordinals[Number(value)] : "to the power of " + value);
+	phrase = phrase.replace(/\b(?:raised )?to the (?:1\/2 power|half);/g, "to the one-half power");
+	phrase = phrase.replace(/\b(?:raised )?to the (minus \d+);/g, "to the power of $1");
+	phrase = phrase.replace(/\braised to the ([\w ]+);/g, "to the power of $1;");
+	// Keep nested scope markers intact even when an inner script is simple.
+	if (!/\bsubscript [^.]*\bsub(?:script)?\b/i.test(phrase)) {
+		phrase = phrase.replace(/\bsubscript ([^.;]+)\. End subscript\./gi, (_, index) =>
+			/^\w+$/.test(index) ? "sub " + index : "at index " + index + ",");
+	}
+	return phrase.replace(/,\s*,/g, ",").replace(/[,;]+$/, "").trim();
+}
+
+// Rewrite recognized TeX structures before MathLive turns their contents into
+// English. Keep custom commands, text arguments and unfamiliar layouts intact.
+function narrationLatex(source) {
+	if (/\\(?:text|operatorname|begin|verb)\b/.test(source)) return source;
+	function argument(offset) {
+		while (/\s/.test(source.charAt(offset)) && offset < source.length) offset++;
+		if (source[offset] !== "{") {
+			const token = source.slice(offset).match(/^(?:\\[a-zA-Z]+|[a-zA-Z0-9])/);
+			return token && { value: token[0], end: offset + token[0].length };
+		}
+		let depth = 1;
+		for (let i = offset + 1; i < source.length; i++) {
+			if (source[i] === "\\") { i++; continue; }
+			if (source[i] === "{") depth++;
+			if (source[i] === "}" && --depth === 0) return { value: source.slice(offset + 1, i), end: i + 1 };
+		}
+		return null;
+	}
+	const commands = /\\(?:[dt]?binom\b|log\s*_)/g;
+	let result = "", copied = 0, match;
+	while ((match = commands.exec(source))) {
+		const first = argument(commands.lastIndex);
+		if (!first) continue;
+		let end = first.end, words;
+		if (match[0].startsWith("\\log")) {
+			words = "\\text{ log base }{" + first.value + "}\\text{ of }";
+		} else {
+			const second = argument(first.end);
+			if (!second) continue;
+			end = second.end;
+			words = "{" + first.value + "}\\text{ choose }{" + second.value + "}";
+		}
+		result += source.slice(copied, match.index) + words;
+		copied = commands.lastIndex = end;
+	}
+	result += source.slice(copied);
+	const absolute = (_, body) => "\\text{ absolute value of }{" + body + "}\\text{, }";
+	return result
+		.replace(/\\left\s*\|([^|]+?)\\right\s*\|/g, absolute)
+		.replace(/\\lvert\b([^|\\]+?)\\rvert\b/g, absolute)
+		.replace(/^\s*\|([^|]+)\|\s*$/, absolute)
+		.replace(/\\lim\s*_\{\s*([a-zA-Z])\s*\\(?:to|rightarrow)\s*(-?\d+(?:\.\d+)?)\s*\^(?:\{([+-])\}|([+-]))\s*\}/g,
+			(_, variable, target, braced, sign) => "\\text{ the limit as }" + variable + "\\text{ approaches }" + target +
+				"\\text{ from the " + ((braced || sign) === "+" ? "right" : "left") + ", of }");
+}
+
 function spokenMath(source) {
 	if (mathPhrases.has(source)) return mathPhrases.get(source);
 	let phrase;
 	try {
 		if (!pocketMathLive.validateLatex(source).length) {
-			phrase = pocketMathLive.convertLatexToSpeakableText(source).trim();
+			phrase = conversationalScripts(pocketMathLive.convertLatexToSpeakableText(narrationLatex(source)).trim());
 		}
 	} catch {
 		// Incomplete or unsupported TeX can occur while a lesson is streaming.
@@ -206,7 +274,7 @@ function chunkWords(anchor) {
 	function collect(node) {
 		if (node.nodeType === 3) {
 			for (const match of node.nodeValue.matchAll(/\S+/gu)) {
-				const text = /^[A-Za-z][_^](?:\d+|\w|\{\w+\})[.,;:!?]?$/.test(match[0]) ? spokenMath(match[0]) : match[0];
+				const text = /^[A-Za-z][_^](?:\d+|\w|\{\w+(?:[+-]\d+)?\})[.,;:!?]?$/.test(match[0]) ? spokenMath(match[0]) : match[0];
 				words.push({ node, start: match.index, end: match.index + match[0].length, text });
 			}
 			return;
@@ -248,9 +316,13 @@ export function activate(ctx) {
 	const name = "pocket-read-aloud-word";
 	const style = document.createElement("style");
 	document.head.append(style);
+	let saveTimer;
 	function persist() {
+		clearTimeout(saveTimer);
+		saveTimer = undefined;
 		try { localStorage.setItem(storageKey, JSON.stringify(state)); } catch {}
 	}
+	window.addEventListener("pagehide", () => { if (saveTimer) persist(); }, { signal: lifetime.signal });
 	function updateColor() {
 		const color = /^#[0-9a-f]{6}$/i.test(state.prefs.color) ? state.prefs.color : "var(--primary, #e6e6e6)";
 		const foreground = state.prefs.color === "theme" ? "var(--primary-foreground, #141414)" : (parseInt(state.prefs.color.slice(1, 3), 16) * .299 + parseInt(state.prefs.color.slice(3, 5), 16) * .587 + parseInt(state.prefs.color.slice(5, 7), 16) * .114 > 140 ? "#141414" : "#ffffff");
@@ -276,12 +348,16 @@ export function activate(ctx) {
 		job.index = index;
 		highlight(job.words[index]);
 		if (state.prefs.remember) {
-			state.positions[key(job.control)] = { index, signature: job.signature };
-			state.last = key(job.control);
+			const positionKey = key(job.control);
+			const firstPosition = !state.positions[positionKey];
+			state.positions[positionKey] = { index, signature: job.signature };
+			state.last = positionKey;
 			// Bound saved positions to avoid unlimited local storage growth.
-			const keys = Object.keys(state.positions);
-			if (keys.length > 2000) delete state.positions[keys[0]];
-			persist();
+			if (firstPosition) {
+				const keys = Object.keys(state.positions);
+				if (keys.length > 2000) delete state.positions[keys[0]];
+			}
+			saveTimer ??= setTimeout(persist, 1000);
 		}
 	}
 
@@ -304,11 +380,35 @@ export function activate(ctx) {
 	function finish(job, cancel = false) {
 		if (active !== job) return;
 		active = undefined;
+		if (saveTimer) persist();
 		if (!state.prefs.keep || !state.prefs.highlight) clearHighlight();
 		job.controller.abort();
 		void audio?.suspend().catch(() => {});
 		if (cancel) void ctx.call("stop", { id: job.id }).catch(() => {});
 		render(job.control);
+	}
+
+	async function prepareSegment(job, start) {
+		const signal = job.controller.signal;
+		signal.throwIfAborted();
+		const wordLimit = job.loading ? 9 : 15;
+		let end = start, length = 0;
+		while (end < job.words.length) {
+			const node = job.words[end].node;
+			const insideFormula = end > start && node.nodeType === 1 && node === job.words[end - 1].node;
+			if (end - start >= wordLimit && !insideFormula && !/^[,.;:!?]+$/.test(job.words[end].text)) break;
+			const next = job.words[end].text;
+			if (length + next.length > 600 && end > start) break;
+			length += next.length + 1;
+			end++;
+			if (/[.!?]$/.test(next) && (node.nodeType !== 1 || job.words[end]?.node !== node)) break;
+		}
+		const group = job.words.slice(start, end);
+		const wav = await ctx.call("speak", { id: job.id, text: group.map(w => w.text).join(" ").replace(/ +([,.;:!?])/g, "$1").slice(0, 700) });
+		signal.throwIfAborted();
+		const buffer = await decode(audio, wav);
+		signal.throwIfAborted();
+		return { end, group, buffer };
 	}
 
 	async function read(job) {
@@ -317,23 +417,15 @@ export function activate(ctx) {
 			const signal = job.controller.signal;
 			// Synthesize short groups with natural phrasing. Word timing is an
 			// estimate based on the duration of the audio and relative word length.
+			let pending = prepareSegment(job, job.index);
 			for (let start = job.index; start < job.words.length;) {
+				const { end, group, buffer } = await pending;
 				signal.throwIfAborted();
-				let end = start, length = 0;
-				while (end < job.words.length && end - start < 15) {
-					const next = job.words[end].text;
-					if (length + next.length > 600 && end > start) break;
-					length += next.length + 1;
-					end++;
-					if (/[.!?]$/.test(next)) break;
+				if (job.loading) {
+					job.loading = false;
+					render(job.control);
 				}
-				const group = job.words.slice(start, end);
-				const wav = await ctx.call("speak", { id: job.id, text: group.map(w => w.text).join(" ").replace(/ +([,.;:!?])/g, "$1").slice(0, 700) });
-				signal.throwIfAborted();
-				const buffer = await decode(audio, wav);
-				signal.throwIfAborted();
-				job.loading = false;
-				render(job.control);
+
 				const begin = audio.currentTime;
 				const weights = group.map(w => Math.max(2, [...w.text].length) + (/[,.!?;:]$/.test(w.text) ? 3 : 0));
 				const total = weights.reduce((a, b) => a + b, 0);
@@ -347,9 +439,17 @@ export function activate(ctx) {
 				};
 				update();
 				const timer = setInterval(update, 35);
-				try { await play(audio, buffer, signal); } finally { clearInterval(timer); }
+				try {
+					const playing = play(audio, buffer, signal);
+					if (end < job.words.length) {
+						pending = prepareSegment(job, end);
+						// It may reject during this clip, or after the user stops.
+						pending.catch(() => {});
+					}
+					await playing;
+				} finally { clearInterval(timer); }
 				signal.throwIfAborted();
-				mark(job, end - 1);
+				if (job.index !== end - 1) mark(job, end - 1);
 				start = end;
 			}
 			delete state.positions[key(job.control)];
