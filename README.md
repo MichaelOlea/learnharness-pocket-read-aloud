@@ -4,7 +4,7 @@ An independent community plugin for [LearnHarness](https://github.com/amosblomqv
 
 ## Install
 
-1. Download [pocket-read-aloud-v1.1.1.zip](pocket-read-aloud-v1.1.1.zip).
+1. Download [pocket-read-aloud-v1.1.3.zip](pocket-read-aloud-v1.1.3.zip).
 2. In LearnHarness, open Settings → Community plugins and locate the plugins directory.
 3. Extract the ZIP there. The expected path is `pocket-read-aloud/dist/manifest.json`.
 4. Install Pocket TTS 4.0.1 in Python 3.10–3.14: `python -m pip install "pocket-tts==4.0.1"`. Use CPU PyTorch if available.
@@ -16,7 +16,7 @@ For updates, replace only the plugin's `dist/` directory and restart the app. Ke
 
 ## Use
 
-Click the speaker beside a lesson chunk to read it aloud. Click again to stop. Select text and use **Read from here** to start at the selection. The speaker resumes a saved position, and the restart button starts the chunk over. Fenced code blocks are skipped.
+Click the speaker beside a lesson chunk to read it aloud. Click again to stop. Select text and use **Read from here** to start at the selection. The speaker resumes a saved position, and the restart button starts the chunk over. Fenced code blocks are skipped. Bundled MathLive 0.111.4 converts rendered formulas into spoken English on-device. For example, a subscript is read as “x sub one” and a half as “half.”
 
 ## Settings
 
@@ -49,4 +49,4 @@ The distributable source is in `src/`. Run `python build.py` to create the insta
 
 ## License and AI disclosure
 
-AGPL-3.0, following LearnHarness. Pocket TTS and its separately downloaded model weights have their own terms. See [AI_DISCLOSURE.md](AI_DISCLOSURE.md).
+AGPL-3.0, following LearnHarness. Bundled MathLive is [MIT licensed](src/MathLive-LICENSE.txt). Pocket TTS and its separately downloaded model weights have their own terms. See [AI_DISCLOSURE.md](AI_DISCLOSURE.md).
